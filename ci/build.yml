@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64 zip
+
+      - name: Build
+        run: make dist
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(sed -n 's/.*GI_VERSION "\(.*\)".*/\1/p' src/common.h)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grail-input-${{ steps.ver.outputs.version }}
+          path: build/pkg/
+
+      - name: Release new version
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "release v$VERSION already exists, skipping"
+            exit 0
+          fi
+          flags=""
+          case "$VERSION" in *-*) flags="--prerelease" ;; esac
+          sed -n "/^## v$VERSION/,/^## v/p" CHANGELOG.md | sed '1d;/^## v/d' > notes.md
+          gh release create "v$VERSION" "build/grail-input-$VERSION.zip" \
+            --target "$GITHUB_SHA" --title "grail-input v$VERSION" --notes-file notes.md $flags
