@@ -20,6 +20,8 @@
 #include "common.h"
 #include "MinHook.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* ---------- GameMaker runtime value ---------- */
 typedef struct {
@@ -110,6 +112,144 @@ static void *find_gml_function(const char *name)
     return NULL;
 }
 
+/* ---------- names of all GML functions (for logs and the ignore list) ---------- */
+typedef struct { BYTE *fn; const char *name; } FnName;
+static FnName *g_fn; static int g_nfn;
+
+static int fn_cmp(const void *a, const void *b)
+{
+    const FnName *x = a, *y = b;
+    return x->fn < y->fn ? -1 : x->fn > y->fn;
+}
+
+static int in_ro(const BYTE *p)
+{
+    return p >= g_img.lo && p < g_img.hi && !(p >= g_text.lo && p < g_text.hi);
+}
+
+static void build_name_table(void)
+{
+    int cap = 8192;
+    g_fn = HeapAlloc(GetProcessHeap(), 0, sizeof(FnName) * (size_t)cap);
+    if (!g_fn) return;
+    for (int d = 0; d < g_ndata; d++) {
+        for (BYTE *p = (BYTE *)(((uintptr_t)g_data[d].lo + 7) & ~(uintptr_t)7); p + 16 <= g_data[d].hi; p += 8) {
+            const char *nm = *(const char **)p;
+            BYTE *fn = *(BYTE **)(p + 8);
+            if (!(fn >= g_text.lo && fn < g_text.hi) || !in_ro((const BYTE *)nm)) continue;
+            if (memcmp(nm, "gml_", 4) != 0) continue;
+            if (g_nfn < cap) { g_fn[g_nfn].fn = fn; g_fn[g_nfn].name = nm; g_nfn++; }
+        }
+    }
+    qsort(g_fn, (size_t)g_nfn, sizeof(FnName), fn_cmp);
+}
+
+static const char *short_name(const char *n)
+{
+    if (strncmp(n, "gml_Script_", 11) == 0) return n + 11;
+    if (strncmp(n, "gml_Object_", 11) == 0) return n + 11;
+    return n;
+}
+
+static const char *fn_name(const BYTE *fn)
+{
+    int lo = 0, hi = g_nfn - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g_fn[mid].fn == fn) return g_fn[mid].name;
+        if (g_fn[mid].fn < fn) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
+}
+
+/* start of the function that contains `pc`, following chained unwind info */
+static BYTE *function_start(void *pc)
+{
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry((DWORD64)(uintptr_t)pc, &base, NULL);
+    for (int guard = 0; rf && guard < 8; guard++) {
+        BYTE *ui = (BYTE *)(uintptr_t)(base + rf->UnwindData);
+        if (!(ui[0] >> 3 & 0x4)) break;                 /* UNW_FLAG_CHAININFO */
+        BYTE count = ui[2];
+        rf = (PRUNTIME_FUNCTION)(ui + 4 + ((count + 1) & ~1) * 2);
+    }
+    return rf ? (BYTE *)(uintptr_t)(base + rf->BeginAddress) : NULL;
+}
+
+/* ---------- call sites of the hover tests ---------- */
+#define MAX_SITES 1024
+static SiteInfo g_sites[MAX_SITES];
+static volatile LONG g_nsites;
+static uint16_t g_site_hash[2048]; /* site index + 1, keyed by return address */
+static BYTE *g_ignored_fn[32]; static int g_nignored;
+static BYTE *g_keep_fn[8]; static int g_nkeep;
+
+static uint16_t site_of(void *ret) /* game thread only */
+{
+    uintptr_t h = ((uintptr_t)ret >> 2) * 2654435761u;
+    for (int i = 0; i < 2048; i++) {
+        uint16_t *slot = &g_site_hash[(h + (uintptr_t)i) & 2047];
+        if (*slot) {
+            if (g_sites[*slot - 1].ret == ret) return (uint16_t)(*slot - 1);
+            continue;
+        }
+        if (g_nsites >= MAX_SITES) return 0xFFFF;
+        SiteInfo *si = &g_sites[g_nsites];
+        BYTE *fn = function_start(ret);
+        const char *nm = fn ? fn_name(fn) : NULL;
+        si->ret = ret;
+        si->script = nm ? short_name(nm) : "?";
+        for (int k = 0; k < g_nignored; k++) if (fn == g_ignored_fn[k]) si->ignored = 1;
+        for (int k = 0; k < g_nkeep; k++) if (fn == g_keep_fn[k]) si->keep = 1;
+        uint16_t idx = (uint16_t)g_nsites;
+        InterlockedIncrement(&g_nsites);
+        *slot = (uint16_t)(idx + 1);
+        LOG2("new hover site #%u in %s (+0x%llx)%s", idx, si->script,
+             (unsigned long long)((BYTE *)ret - g_img.lo), si->ignored ? " [ignored]" : "");
+        return idx;
+    }
+    return 0xFFFF;
+}
+
+static const SiteInfo k_unknown_site = { NULL, "?", 0, 0 };
+const SiteInfo *hooks_site(uint16_t site)
+{
+    return site < g_nsites ? &g_sites[site] : &k_unknown_site;
+}
+
+static BYTE *find_fn_by_short_name(const char *n)
+{
+    char full[160];
+    snprintf(full, sizeof full, "gml_Script_%s", n);
+    for (int i = 0; i < g_nfn; i++) if (strcmp(g_fn[i].name, full) == 0) return g_fn[i].fn;
+    for (int i = 0; i < g_nfn; i++) if (strcmp(g_fn[i].name, n) == 0) return g_fn[i].fn;
+    return NULL;
+}
+
+static void resolve_script_lists(void)
+{
+    char buf[512], *p = buf;
+    snprintf(buf, sizeof buf, "%s", g_cfg.ignore_scripts);
+    while (*p) {
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        char *e = p;
+        while (*e && *e != ',' && *e != ' ' && *e != '\t') e++;
+        char save = *e; *e = 0;
+        if (*p && _stricmp(p, "none") != 0) {
+            BYTE *fn = find_fn_by_short_name(p);
+            if (fn && g_nignored < 32) g_ignored_fn[g_nignored++] = fn;
+            else LOG1("ignore_scripts: '%s' not found in this game version", p);
+        }
+        *e = save; p = e;
+    }
+    static const char *const keep[] = { "card_on", "button_draw", "button_sprite" };
+    for (int i = 0; i < 3; i++) {
+        BYTE *fn = find_fn_by_short_name(keep[i]);
+        if (fn) g_keep_fn[g_nkeep++] = fn;
+    }
+    LOG1("navigation: %d function names, %d ignored scripts", g_nfn, g_nignored);
+}
+
 /* ---------- navigation target store ---------- */
 #define MAX_RECTS 768
 static CRITICAL_SECTION g_cs;
@@ -119,10 +259,18 @@ static double g_pub_time = -1e9, g_collect_time;
 static volatile LONG g_frame;
 static int g_have_step, g_have_rects;
 
-/* latest mouse position as the game sees it (UI coordinates) */
-static volatile double g_mx, g_my;
-static volatile LONG g_m_frame;
+/* latest mouse position as the game sees it (UI coordinates), per frame */
+typedef struct { double x, y; LONG frame; } MouseSample;
+static MouseSample g_ms_cur, g_ms_prev; /* game thread writes, input thread reads under g_cs */
 static volatile LONG g_have_mx, g_have_my;
+
+static void note_mouse(int axis, double v)
+{
+    EnterCriticalSection(&g_cs);
+    if (g_ms_cur.frame != g_frame) { g_ms_prev = g_ms_cur; g_ms_cur.frame = g_frame; }
+    if (axis == 0) { g_ms_cur.x = v; g_have_mx = 1; } else { g_ms_cur.y = v; g_have_my = 1; }
+    LeaveCriticalSection(&g_cs);
+}
 
 /* caller holds g_cs */
 static void publish_locked(double now)
@@ -133,7 +281,7 @@ static void publish_locked(double now)
     g_ncollect = 0;
 }
 
-static void add_rect(float cx, float cy, float w, float h)
+static void add_rect(float cx, float cy, float w, float h, uint16_t site)
 {
     if (!(w > 0.5f && h > 0.5f) || w > 1e5f || h > 1e5f) return;
     if (cx != cx || cy != cy) return; /* NaN */
@@ -144,10 +292,10 @@ static void add_rect(float cx, float cy, float w, float h)
     int dup = 0;
     for (int i = g_ncollect - 1; i >= 0 && i >= g_ncollect - 64; i--) {
         NavRect *r = &g_collect[i];
-        if (r->cx == cx && r->cy == cy && r->w == w && r->h == h) { dup = 1; break; }
+        if (r->cx == cx && r->cy == cy && r->w == w && r->h == h && r->site == site) { dup = 1; break; }
     }
     if (!dup && g_ncollect < MAX_RECTS)
-        g_collect[g_ncollect++] = (NavRect){ cx, cy, w, h };
+        g_collect[g_ncollect++] = (NavRect){ cx, cy, w, h, site };
     g_collect_time = now;
     LeaveCriticalSection(&g_cs);
 }
@@ -162,7 +310,7 @@ static RValue *hk_mouse_on(void *self, void *other, RValue *res, int argc, RValu
         rv_num(args[2], &w) && rv_num(args[3], &h)) {
         if (w < 0) w = -w;
         if (h < 0) h = -h;
-        add_rect((float)x, (float)y, (float)w, (float)h);
+        add_rect((float)x, (float)y, (float)w, (float)h, site_of(__builtin_return_address(0)));
     }
     return o_mouse_on(self, other, res, argc, args);
 }
@@ -175,7 +323,8 @@ static RValue *hk_mouse_on_between(void *self, void *other, RValue *res, int arg
         double w = x2 - x1, h = y2 - y1;
         if (w < 0) w = -w;
         if (h < 0) h = -h;
-        add_rect((float)((x1 + x2) * 0.5), (float)((y1 + y2) * 0.5), (float)w, (float)h);
+        add_rect((float)((x1 + x2) * 0.5), (float)((y1 + y2) * 0.5), (float)w, (float)h,
+                 site_of(__builtin_return_address(0)));
     }
     return o_mouse_on_between(self, other, res, argc, args);
 }
@@ -184,7 +333,7 @@ static RValue *hk_mouse_get_x(void *self, void *other, RValue *res, int argc, RV
 {
     RValue *r = o_mouse_get_x(self, other, res, argc, args);
     double v;
-    if (rv_num(r, &v)) { g_mx = v; g_m_frame = g_frame; g_have_mx = 1; }
+    if (rv_num(r, &v)) note_mouse(0, v);
     return r;
 }
 
@@ -192,7 +341,7 @@ static RValue *hk_mouse_get_y(void *self, void *other, RValue *res, int argc, RV
 {
     RValue *r = o_mouse_get_y(self, other, res, argc, args);
     double v;
-    if (rv_num(r, &v)) { g_my = v; g_m_frame = g_frame; g_have_my = 1; }
+    if (rv_num(r, &v)) note_mouse(1, v);
     return r;
 }
 
@@ -227,8 +376,23 @@ int hooks_snapshot(NavRect *out, int max, double *age_ms)
 int hooks_mouse_sample(double *gx, double *gy, uint32_t *frame)
 {
     if (!g_have_mx || !g_have_my) return 0;
-    *gx = g_mx; *gy = g_my; *frame = (uint32_t)g_m_frame;
+    EnterCriticalSection(&g_cs);
+    *gx = g_ms_cur.x; *gy = g_ms_cur.y; *frame = (uint32_t)g_ms_cur.frame;
+    LeaveCriticalSection(&g_cs);
     return 1;
+}
+
+/* the same mouse value in two different frames: the game has settled on it */
+int hooks_mouse_stable(double *gx, double *gy, uint32_t *frame)
+{
+    if (!g_have_mx || !g_have_my) return 0;
+    EnterCriticalSection(&g_cs);
+    int ok = g_ms_prev.frame != g_ms_cur.frame &&
+             g_ms_prev.x == g_ms_cur.x && g_ms_prev.y == g_ms_cur.y;
+    /* report the older frame: both frames are at least this recent */
+    *gx = g_ms_cur.x; *gy = g_ms_cur.y; *frame = (uint32_t)g_ms_prev.frame;
+    LeaveCriticalSection(&g_cs);
+    return ok;
 }
 
 static int hook_one(const char *name, void *detour, void **orig)
@@ -248,6 +412,8 @@ int hooks_install(void)
     InitializeCriticalSection(&g_cs);
     scan_sections();
     if (!g_text.lo || !g_ndata) { LOG1("hooks: could not read exe sections"); return 0; }
+    build_name_table();
+    resolve_script_lists();
     MH_STATUS st = MH_Initialize();
     if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
         LOG1("hooks: MH_Initialize failed (%s)", MH_StatusToString(st));

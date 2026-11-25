@@ -1,6 +1,8 @@
 # Changelog
 
-## v1.0.0-beta.2
+## v1.0.0-beta.3
+
+(v1.0.0-beta.2 was released from an incomplete commit and only contains the beta.1 behaviour; use beta.3.)
 
 - D-pad / arrow keys no longer jump to spots that do not react when hovered:
   - hover tests from scroll areas, text boxes, the battle log and cosmetic clipping are ignored (`[navigation] ignore_scripts`)

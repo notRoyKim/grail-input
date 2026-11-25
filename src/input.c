@@ -250,15 +250,33 @@ static void axis_add(Axis *A, double p, double v)
     axis_fit(A);
 }
 
+/* both axes fitted, increasing, and with about the same scale (the game never stretches) */
+static int cal_ok(void)
+{
+    if (!(g_cal_x.ok && g_cal_y.ok)) return 0;
+    if (g_cal_x.a <= 0 || g_cal_y.a <= 0) return 0;
+    double r = g_cal_x.a / g_cal_y.a;
+    return r > 0.7 && r < 1.43;
+}
+
+static void cal_reset(const char *why)
+{
+    if (g_cal_x.n || g_cal_y.n) LOG1("calibration reset: %s", why);
+    axis_reset(&g_cal_x); axis_reset(&g_cal_y);
+}
+
 static POINT g_stable_pos;
 static uint32_t g_stable_frame;
 static double g_stable_time;
 static int g_stable_sampled;
 
-static int sample_ready(uint32_t sample_frame, uint32_t since_frame, double since_time, double now)
+/* a mouse sample the game took at least one frame after `since_frame` and kept for two frames */
+static int settled_sample(uint32_t since_frame, double since_time, double now, double *gx, double *gy)
 {
-    if (hooks_have_frames()) return (int32_t)(sample_frame - since_frame) >= 2 && now - since_time > 25.0;
-    return now - since_time > 120.0;
+    uint32_t f;
+    if (hooks_have_frames())
+        return hooks_mouse_stable(gx, gy, &f) && (int32_t)(f - since_frame) >= 1 && now - since_time > 25.0;
+    return hooks_mouse_sample(gx, gy, &f) && now - since_time > 150.0;
 }
 
 static void passive_sample(double now)
@@ -269,73 +287,138 @@ static void passive_sample(double now)
         return;
     }
     if (g_stable_sampled) return;
-    double gx, gy; uint32_t f;
-    if (!hooks_mouse_sample(&gx, &gy, &f) || !sample_ready(f, g_stable_frame, g_stable_time, now)) return;
-    if (p.x < 0 || p.y < 0 || p.x >= g_cw || p.y >= g_ch) { g_stable_sampled = 1; return; }
-    int was = g_cal_x.ok && g_cal_y.ok;
+    double gx, gy;
+    if (!settled_sample(g_stable_frame, g_stable_time, now, &gx, &gy)) return;
+    g_stable_sampled = 1;
+    if (p.x < 0 || p.y < 0 || p.x >= g_cw || p.y >= g_ch) return;
+    if (cal_ok()) {
+        double ex = fabs(g_cal_x.a * p.x + g_cal_x.b - gx), ey = fabs(g_cal_y.a * p.y + g_cal_y.b - gy);
+        if (ex > 4 || ey > 4) cal_reset("game coordinates changed");
+    }
+    int was = cal_ok();
     axis_add(&g_cal_x, p.x, gx);
     axis_add(&g_cal_y, p.y, gy);
-    g_stable_sampled = 1;
     LOG2("calib sample: client (%ld,%ld) -> game (%.2f,%.2f)", p.x, p.y, gx, gy);
-    if (!was && g_cal_x.ok && g_cal_y.ok)
+    if (!was && cal_ok())
         LOG1("calibrated (passive): game = %.4f*x%+.2f, %.4f*y%+.2f (client %dx%d)",
              g_cal_x.a, g_cal_x.b, g_cal_y.a, g_cal_y.b, g_cw, g_ch);
 }
 
 static int calibrate_active(void)
 {
-    double t_all = gi_now_ms();
-    float pts[2][2] = { { g_cw * 0.38f, g_ch * 0.38f }, { g_cw * 0.62f, g_ch * 0.62f } };
-    for (int i = 0; i < 2; i++) {
-        move_cursor(pts[i][0], pts[i][1]);
-        uint32_t f0 = hooks_frame();
-        double t0 = gi_now_ms();
-        for (;;) {
-            Sleep(4);
-            double now = gi_now_ms(), gx, gy; uint32_t f;
-            if (hooks_mouse_sample(&gx, &gy, &f) && sample_ready(f, f0, t0, now)) {
-                POINT c = game_cursor_client();
-                axis_add(&g_cal_x, c.x, gx);
-                axis_add(&g_cal_y, c.y, gy);
-                break;
+    static const float pts[3][2] = { { 0.36f, 0.36f }, { 0.64f, 0.64f }, { 0.50f, 0.42f } };
+    for (int attempt = 0; attempt < 3; attempt++) {
+        double t_all = gi_now_ms();
+        axis_reset(&g_cal_x); axis_reset(&g_cal_y);
+        int got = 0;
+        for (int i = 0; i < 3; i++) {
+            move_cursor(pts[i][0] * g_cw, pts[i][1] * g_ch);
+            uint32_t f0 = hooks_frame();
+            double t0 = gi_now_ms(), gx = 0, gy = 0;
+            int ok = 0;
+            while (gi_now_ms() - t0 < 700) {
+                Sleep(4);
+                if (settled_sample(f0, t0, gi_now_ms(), &gx, &gy)) { ok = 1; break; }
             }
-            if (now - t0 > 600) { LOG1("calibration: game did not report the mouse (timeout)"); return 0; }
+            if (!ok) break;
+            POINT c = game_cursor_client();
+            axis_add(&g_cal_x, c.x, gx);
+            axis_add(&g_cal_y, c.y, gy);
+            LOG2("calib point %d: client (%ld,%ld) -> game (%.2f,%.2f)", i, c.x, c.y, gx, gy);
+            got++;
         }
+        /* all three points must sit on one straight line per axis */
+        if (got == 3 && g_cal_x.n == 3 && g_cal_y.n == 3 && cal_ok()) {
+            LOG1("calibrated (active, %.0f ms): game = %.4f*x%+.2f, %.4f*y%+.2f (client %dx%d)",
+                 gi_now_ms() - t_all, g_cal_x.a, g_cal_x.b, g_cal_y.a, g_cal_y.b, g_cw, g_ch);
+            return 1;
+        }
+        LOG1("calibration attempt %d inconsistent (%d points), retrying", attempt + 1, got);
+        Sleep(150);
     }
-    LOG1("calibrated (active, %.0f ms): game = %.4f*x%+.2f, %.4f*y%+.2f (client %dx%d)%s",
-         gi_now_ms() - t_all, g_cal_x.a, g_cal_x.b, g_cal_y.a, g_cal_y.b, g_cw, g_ch,
-         g_cal_x.ok && g_cal_y.ok ? "" : " - FAILED");
-    return g_cal_x.ok && g_cal_y.ok;
+    cal_reset("active calibration failed");
+    return 0;
 }
 
 /* ---------- smart navigation ---------- */
 #define MAX_TARGETS 768
-typedef struct { float x, y, w, h; } Target;
+typedef struct { float x, y, w, h; uint16_t site; uint8_t keep, dead; } Target;
 
+static float overlap(const Target *a, const Target *b)
+{
+    float x0 = fmaxf(a->x - a->w / 2, b->x - b->w / 2), x1 = fminf(a->x + a->w / 2, b->x + b->w / 2);
+    float y0 = fmaxf(a->y - a->h / 2, b->y - b->h / 2), y1 = fminf(a->y + a->h / 2, b->y + b->h / 2);
+    return (x1 > x0 && y1 > y0) ? (x1 - x0) * (y1 - y0) : 0;
+}
+
+static int contains_center(const Target *a, const Target *b)
+{
+    return fabsf(b->x - a->x) < a->w / 2 && fabsf(b->y - a->y) < a->h / 2;
+}
+
+/* The game also tests the mouse against things that never react when hovered:
+ * scroll areas, panels around a list of cards, the same spot tested twice...
+ * Keep only what is likely to be a button, card, icon or tooltip spot. */
 static int collect_targets(Target *t, int max)
 {
     static NavRect rs[MAX_TARGETS];
     double age;
     int n = hooks_snapshot(rs, MAX_TARGETS, &age);
     int m = 0;
-    float area_max = g_cfg.max_area * (float)g_cw * (float)g_ch;
+    float W = (float)g_cw, H = (float)g_ch, area_max = g_cfg.max_area * W * H;
     for (int i = 0; i < n && m < max; i++) {
+        const SiteInfo *si = hooks_site(rs[i].site);
+        if (si->ignored) continue;
         float x = (float)((rs[i].cx - g_cal_x.b) / g_cal_x.a);
         float y = (float)((rs[i].cy - g_cal_y.b) / g_cal_y.a);
         float w = (float)fabs(rs[i].w / g_cal_x.a), h = (float)fabs(rs[i].h / g_cal_y.a);
         if (w < g_cfg.min_size_px || h < g_cfg.min_size_px) continue;
         if (w * h > area_max) continue;
-        if (x < 0 || y < 0 || x >= g_cw || y >= g_ch) continue;
-        int dup = 0;
-        for (int j = 0; j < m; j++) {
-            if (fabsf(t[j].x - x) <= 3 && fabsf(t[j].y - y) <= 3) {
-                if (w * h < t[j].w * t[j].h) { t[j].w = w; t[j].h = h; }
-                dup = 1; break;
+        /* mostly on screen */
+        float vx = fminf(x + w / 2, W) - fmaxf(x - w / 2, 0), vy = fminf(y + h / 2, H) - fmaxf(y - h / 2, 0);
+        if (vx <= 0 || vy <= 0 || vx * vy < 0.5f * w * h) continue;
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        t[m++] = (Target){ x, y, w, h, rs[i].site, si->keep, 0 };
+    }
+    /* the same spot tested more than once: keep the smaller, more specific one */
+    for (int i = 0; i < m; i++) {
+        if (t[i].dead) continue;
+        for (int j = i + 1; j < m; j++) {
+            if (t[j].dead) continue;
+            float ai = t[i].w * t[i].h, aj = t[j].w * t[j].h, ov = overlap(&t[i], &t[j]);
+            if (ov >= 0.6f * (ai + aj - ov)) {
+                if (aj < ai) { t[i].dead = 1; break; }
+                t[j].dead = 1;
             }
         }
-        if (!dup) t[m++] = (Target){ x, y, w, h };
     }
-    return m;
+    /* panels that hold other targets (hand area, list backgrounds) */
+    if (g_cfg.drop_containers) {
+        for (int i = 0; i < m; i++) {
+            if (t[i].dead || t[i].keep) continue;
+            float ai = t[i].w * t[i].h;
+            int inside = 0;
+            for (int j = 0; j < m; j++) {
+                if (j == i || t[j].dead) continue;
+                if (t[j].w * t[j].h < 0.6f * ai && contains_center(&t[i], &t[j])) inside++;
+            }
+            if ((inside >= 1 && ai > 0.06f * W * H) || inside >= 4) t[i].dead = 1;
+        }
+    }
+    int k = 0;
+    for (int i = 0; i < m; i++) if (!t[i].dead) t[k++] = t[i];
+    return k;
+}
+
+static double g_last_dump;
+static void dump_targets(const Target *t, int n)
+{
+    double now = gi_now_ms();
+    if (g_log_level < 2 || now - g_last_dump < 3000) return;
+    g_last_dump = now;
+    LOG2("targets on screen (%d):", n);
+    for (int i = 0; i < n; i++)
+        LOG2("  (%4.0f,%4.0f) %4.0fx%-4.0f %s", t[i].x, t[i].y, t[i].w, t[i].h, hooks_site(t[i].site)->script);
 }
 
 static const float k_dir[4][2] = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }; /* up down left right */
@@ -345,7 +428,7 @@ static const char *const k_dir_name[4] = { "up", "down", "left", "right" };
 static int smart_nav(int dir)
 {
     float px = g_vx, py = g_vy, dx = k_dir[dir][0], dy = k_dir[dir][1];
-    if (!(g_cal_x.ok && g_cal_y.ok)) {
+    if (!cal_ok()) {
         int ok = calibrate_active();
         move_cursor(px, py); /* calibration moved the cursor around: put it back */
         if (!ok) return 0;
@@ -353,6 +436,7 @@ static int smart_nav(int dir)
     static Target t[MAX_TARGETS];
     int n = collect_targets(t, MAX_TARGETS);
     if (n == 0) { LOG2("nav %s: no targets on screen", k_dir_name[dir]); return 0; }
+    dump_targets(t, n);
     int best = -1;
     float best_score = 1e30f;
     for (int i = 0; i < n; i++) {
@@ -365,8 +449,8 @@ static int smart_nav(int dir)
         if (score < best_score) { best_score = score; best = i; }
     }
     if (best < 0) { LOG2("nav %s: %d targets, none in that direction", k_dir_name[dir], n); return -1; }
-    LOG2("nav %s: %d targets, (%.0f,%.0f) -> (%.0f,%.0f) size %.0fx%.0f", k_dir_name[dir], n,
-         px, py, t[best].x, t[best].y, t[best].w, t[best].h);
+    LOG2("nav %s: %d targets, (%.0f,%.0f) -> (%.0f,%.0f) size %.0fx%.0f [%s]", k_dir_name[dir], n,
+         px, py, t[best].x, t[best].y, t[best].w, t[best].h, hooks_site(t[best].site)->script);
     move_cursor(t[best].x, t[best].y);
     return 1;
 }
@@ -469,7 +553,7 @@ static DWORD WINAPI input_thread(LPVOID arg)
         if (cr.right != g_cw || cr.bottom != g_ch) {
             if (g_cw) LOG1("client size %dx%d -> %ldx%ld, recalibrating", g_cw, g_ch, cr.right, cr.bottom);
             g_cw = cr.right; g_ch = cr.bottom;
-            axis_reset(&g_cal_x); axis_reset(&g_cal_y);
+            cal_reset("window resized");
         }
 
         int active = GetForegroundWindow() == g_hwnd || g_cfg.background_input;
@@ -566,7 +650,7 @@ static DWORD WINAPI input_thread(LPVOID arg)
             NavRect tmp[4]; double age;
             int nr = hooks_snapshot(tmp, 4, &age);
             LOG2("stats: frame %u, rects(last frame) %s%d, age %.0f ms, calib %s, pad %s, pad_mode %d, override %ld",
-                 hooks_frame(), nr >= 4 ? ">=" : "", nr, age > 1e6 ? -1.0 : age, g_cal_x.ok && g_cal_y.ok ? "ok" : "no",
+                 hooks_frame(), nr >= 4 ? ">=" : "", nr, age > 1e6 ? -1.0 : age, cal_ok() ? "ok" : "no",
                  pad.connected ? "yes" : "no", g_pad_mode, (long)g_override_active);
         }
     }

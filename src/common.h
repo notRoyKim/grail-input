@@ -14,7 +14,7 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define GI_VERSION "1.0.0-beta.2"
+#define GI_VERSION "1.0.0-beta.3"
 
 /* ---------- logging (main.c) ---------- */
 extern int g_log_level; /* 0 off, 1 normal, 2 verbose */

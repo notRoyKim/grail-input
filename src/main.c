@@ -138,7 +138,7 @@ static void for_tokens(const char *list, void (*fn)(const char *, void *), void 
 /* tiny ini reader: UTF-8 (with or without BOM) or UTF-16LE with BOM,
  * so Korean comments never depend on the system code page */
 #define INI_MAX 160
-typedef struct { char sec[32], key[48], val[160]; } IniEntry;
+typedef struct { char sec[32], key[48], val[512]; } IniEntry;
 static IniEntry g_ini_e[INI_MAX];
 static int g_ini_n;
 
@@ -302,6 +302,10 @@ void config_load(const wchar_t *ini_path)
     c->min_size_px = ini_float("navigation", "min_target_size", 6.0f);
     c->max_area = ini_float("navigation", "max_target_area", 0.45f);
     c->perp_weight = ini_float("navigation", "sideways_weight", 2.0f);
+    c->drop_containers = ini_int("navigation", "ignore_containers", 1);
+    ini_str("navigation", "ignore_scripts",
+            "UI_scroll_bar, UI_scroll_bar_ext, draw_text_box, battle_log_draw, cosmetic_draw",
+            c->ignore_scripts, sizeof c->ignore_scripts);
 
     ini_str("cursor", "parsec_fix", "off", b, sizeof b);
     if (_stricmp(b, "transparent") == 0 || _stricmp(b, "on") == 0 || strcmp(b, "1") == 0) c->cursorfix_mode = CURSORFIX_TRANSPARENT;
