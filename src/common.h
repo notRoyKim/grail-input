@@ -14,7 +14,7 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define GI_VERSION "1.0.0-beta.1"
+#define GI_VERSION "1.0.0-beta.2"
 
 /* ---------- logging (main.c) ---------- */
 extern int g_log_level; /* 0 off, 1 normal, 2 verbose */
@@ -70,6 +70,8 @@ typedef struct {
     float min_size_px;
     float max_area;       /* fraction of client area */
     float perp_weight;
+    int drop_containers;  /* ignore panels that hold other targets */
+    char ignore_scripts[512]; /* comma list of gml script names whose hover tests are not targets */
 
     /* cursor */
     int cursorfix_mode;
@@ -81,7 +83,15 @@ extern GiConfig g_cfg;
 void config_load(const wchar_t *ini_path);
 
 /* ---------- game hooks (gml_hooks.c) ---------- */
-typedef struct { float cx, cy, w, h; } NavRect;
+typedef struct { float cx, cy, w, h; uint16_t site; } NavRect;
+
+/* where a hover test came from: the GML script that called mouse_on */
+typedef struct {
+    void *ret;            /* return address of the mouse_on call */
+    const char *script;   /* "game_draw", "button_draw"... or "?" */
+    uint8_t ignored;      /* script listed in ignore_scripts */
+    uint8_t keep;         /* never treat as a container (cards, buttons) */
+} SiteInfo;
 
 int  hooks_install(void);            /* returns bitmask of installed hooks */
 void hooks_install_iat(void);        /* SetCursor + GetCursorPos */
@@ -90,6 +100,9 @@ int  hooks_mouse_sample(double *gx, double *gy, uint32_t *frame);
 uint32_t hooks_frame(void);          /* frame counter (Step hook), 0 if unavailable */
 int  hooks_have_frames(void);
 int  hooks_have_rects(void);
+const SiteInfo *hooks_site(uint16_t site);
+/* two most recent mouse samples from different frames (for stable calibration) */
+int  hooks_mouse_stable(double *gx, double *gy, uint32_t *frame);
 
 /* cursor override shared with input.c */
 extern volatile LONG g_override_active;
