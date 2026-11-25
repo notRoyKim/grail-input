@@ -60,6 +60,7 @@ Y 버튼은 비워 두었습니다(게임 자체가 일부 화면에서 패드 �
 
 - `[gamepad] cursor_speed` — 스틱 커서 속도
 - `[navigation] smart = 0` — D패드로 점프하지 않고 조금씩만 움직이기
+- `[navigation] ignore_scripts` — 점프 대상에서 뺄 게임 스크립트 목록. 반응 없는 곳으로 간다면 `log_level = 2`로 로그를 보고 해당 스크립트 이름을 추가하세요
 - `[cursor] parsec_fix = transparent` — Parsec으로 원격 플레이할 때 마우스가 창에 갇히는 문제 해결 (예전 `parsec_cursor_fix`와 같은 기능, 이 모드에 포함됨)
 - `[general] log_level = 2` — 문제가 있을 때 자세한 로그
 
@@ -75,7 +76,7 @@ Y 버튼은 비워 두었습니다(게임 자체가 일부 화면에서 패드 �
 Grail은 GameMaker YYC로 빌드되어 모든 GML 스크립트가 `grail.exe` 안의 네이티브 함수입니다. 이 모드는 `version.dll` 프록시로 게임 프로세스에 들어가서:
 
 1. exe 안의 스크립트 이름표에서 `mouse_on`, `mouse_on_between`, `mouse_get_x/y`, `oGameManager` Step 이벤트를 찾아 [MinHook](https://github.com/TsudaKageyu/minhook)으로 후킹합니다.
-2. 매 프레임 게임이 "마우스가 이 사각형 위에 있나?"를 물어보는 영역을 모읍니다. 이것이 버튼·카드·지도 칸 = 이동 대상입니다.
+2. 매 프레임 게임이 "마우스가 이 사각형 위에 있나?"를 물어보는 영역을 모읍니다. 이것이 버튼·카드·지도 칸 = 이동 대상입니다. 스크롤 영역·텍스트 상자처럼 올려도 반응이 없는 영역, 다른 대상을 감싸는 패널, 겹친 영역은 걸러냅니다.
 3. 게임 좌표와 창 픽셀의 관계는 커서가 멈춰 있을 때의 `mouse_get_x/y` 값으로 자동 보정합니다.
 4. 입력 스레드가 XInput 패드와 키보드를 읽어 커서 이동(`SetCursorPos`)과 클릭·휠·Esc(`SendInput`)를 만듭니다. 포인터 이동이 무시되는 환경(일부 gamescope)을 위해 게임의 `GetCursorPos`에는 가상 커서 위치를 알려줍니다.
 
