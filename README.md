@@ -46,13 +46,29 @@ PlayStation·Switch Pro 패드는 Steam 설정 → 컨트롤러에서 해당 패
 | B | 오른쪽 Ctrl, 메뉴 키 | 오른쪽 클릭 |
 | X, START | (Esc 그대로) | Esc — 메뉴 열기·창 닫기 |
 | LB / RB, 오른쪽 스틱 | PageUp / PageDown | 스크롤 |
-| LT 누르고 있기 | | 커서 느리게 (정밀 조작) |
-| RT 누르고 있기 | | 커서 빠르게 |
-| BACK | Home | 커서를 화면 가운데로 |
+| LT / RT | F1 / F2 | 단축키 1·2번 (아래 참고) |
+| | F3 ~ F8 | 단축키 3~8번 |
+| BACK 짧게 | Home | 커서를 화면 가운데로 |
 
 Y 버튼은 비워 두었습니다(게임 자체가 일부 화면에서 패드 입력을 읽습니다). 모든 버튼·키는 `grail_input.ini`에서 바꿀 수 있습니다.
 
 실제 마우스를 움직이면 바로 마우스 조작으로 돌아오고, 패드나 키를 누르면 그 위치에서 이어서 움직입니다.
+
+## 단축키
+
+원하는 게임 버튼(덱 보기, 찢어진 카드, 턴 종료 등)을 키 하나로 누를 수 있습니다. 8칸이 있고 1번 = F1·LT, 2번 = F2·RT, 3~8번 = F3~F8입니다.
+
+1. 게임에서 그 버튼에 커서를 올립니다 (마우스, 방향키, 스틱 아무거나).
+2. **Ctrl + F1** (1번 칸) ~ **Ctrl + F8**을 누릅니다. 패드라면 **BACK을 누른 채** LT 같은 버튼을 누릅니다.
+3. 화면 아래에 `F1/LT SET`이 뜨고, 그 버튼 옆에 키 표시가 생깁니다. 이제 F1이나 LT를 누르면 그 버튼이 눌립니다.
+
+빈 곳에서 같은 조합을 누르면 그 칸이 비워집니다. 지정한 내용은 `grail_input_shortcuts.ini`에 저장되고, 이 파일을 같이 나눠 주면 다른 사람도 같은 단축키를 씁니다.
+
+## 화면 표시
+
+- D패드·방향키로 버튼을 고르면 그 버튼에 노란 테두리가 생깁니다.
+- 단축키가 있는 버튼 옆에는 키 표시(최근에 패드를 썼으면 `LT`, 키보드를 썼으면 `F1`)가 붙습니다.
+- `grail_input.ini`의 `[overlay]`에서 끄거나 크기를 바꿀 수 있습니다.
 
 ## 설정 (`grail_input.ini`)
 
@@ -79,6 +95,7 @@ Grail은 GameMaker YYC로 빌드되어 모든 GML 스크립트가 `grail.exe` �
 2. 매 프레임 게임이 "마우스가 이 사각형 위에 있나?"를 물어보는 영역을 모읍니다. 이것이 버튼·카드·지도 칸 = 이동 대상입니다. 스크롤 영역·텍스트 상자처럼 올려도 반응이 없는 영역, 다른 대상을 감싸는 패널, 겹친 영역은 걸러냅니다.
 3. 게임 좌표와 창 픽셀의 관계는 커서가 멈춰 있을 때의 `mouse_get_x/y` 값으로 자동 보정합니다.
 4. 입력 스레드가 XInput 패드와 키보드를 읽어 커서 이동(`SetCursorPos`)과 클릭·휠·Esc(`SendInput`)를 만듭니다. 포인터 이동이 무시되는 환경(일부 gamescope)을 위해 게임의 `GetCursorPos`에는 가상 커서 위치를 알려줍니다.
+5. 화면 표시는 D3D11 `IDXGISwapChain::Present`를 후킹해서, 게임이 그린 화면 위에 작은 픽셀 글꼴과 사각형을 그립니다 (스팀덱의 DXVK에서도 같은 방식).
 
 ### 직접 빌드
 
@@ -99,7 +116,9 @@ Adds **gamepad and keyboard controls** to Grail by Sokpop, on Windows and **Stea
 **Install (Steam Deck):** same, then set the launch option `WINEDLLOVERRIDES="version=n,b" %command%` and pick the *Gamepad* controller layout.
 **Uninstall:** delete `version.dll`.
 
-**Controls:** left stick moves the cursor · D-pad / arrow keys jump to the nearest button or card in that direction · A / Enter / Space click (hold to drag) · B / Right Ctrl right-click · X / Start Esc · LB, RB, right stick / PageUp, PageDown scroll · LT slow, RT fast · Back / Home centre the cursor. Everything is configurable in `grail_input.ini`.
+**Controls:** left stick moves the cursor · D-pad / arrow keys jump to the nearest button or card in that direction · A / Enter / Space click (hold to drag) · B / Right Ctrl right-click · X / Start Esc · LB, RB, right stick / PageUp, PageDown scroll · Back (tap) / Home centre the cursor. Everything is configurable in `grail_input.ini`.
+
+**Shortcuts:** 8 slots (F1-F8; slot 1 is also LT, slot 2 RT) press a game button you choose. Put the cursor on the button and press Ctrl + F1..F8 (or hold Back and press a pad button). The overlay frames the selected button and shows each shortcut key next to its button.
 
 **How it works:** the game is a GameMaker YYC build; the mod hooks the game's own `mouse_on` hover tests to learn where every button and card is each frame, calibrates game coordinates against window pixels automatically, and drives the mouse with `SetCursorPos` / `SendInput` (plus a `GetCursorPos` override for environments that ignore pointer warps).
 
