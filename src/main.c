@@ -45,6 +45,7 @@ double gi_now_ms(void)
 /* ---------- logging ---------- */
 int g_log_level = 1;
 static wchar_t g_log_path[MAX_PATH];
+wchar_t g_mod_dir[MAX_PATH];
 static CRITICAL_SECTION g_log_cs;
 static int g_log_lines;
 
@@ -102,7 +103,7 @@ static const NameBit k_vk_names[] = {
     {"F7", VK_F7}, {"F8", VK_F8}, {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
 };
 
-static int parse_vk(const char *s)
+int parse_vk(const char *s)
 {
     if (!*s) return 0;
     for (size_t i = 0; i < sizeof k_vk_names / sizeof *k_vk_names; i++)
@@ -113,11 +114,27 @@ static int parse_vk(const char *s)
     return -1;
 }
 
-static uint32_t parse_pad_bit(const char *s)
+uint32_t parse_pad_bit(const char *s)
 {
     for (size_t i = 0; i < sizeof k_pad_names / sizeof *k_pad_names; i++)
         if (_stricmp(s, k_pad_names[i].name) == 0) return k_pad_names[i].bit;
     return 0;
+}
+
+const char *pad_name(uint32_t bit)
+{
+    for (size_t i = 0; i < sizeof k_pad_names / sizeof *k_pad_names; i++)
+        if (k_pad_names[i].bit == bit) return k_pad_names[i].name;
+    return "NONE";
+}
+
+const char *vk_name(int vk, char *buf, int cap)
+{
+    for (size_t i = 0; i < sizeof k_vk_names / sizeof *k_vk_names; i++)
+        if ((int)k_vk_names[i].bit == vk) { snprintf(buf, (size_t)cap, "%s", k_vk_names[i].name); return buf; }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) { snprintf(buf, (size_t)cap, "%c", vk); return buf; }
+    snprintf(buf, (size_t)cap, vk ? "0x%02X" : "NONE", vk);
+    return buf;
 }
 
 /* split "A, START" into tokens; calls fn on each trimmed token */
@@ -150,7 +167,7 @@ static char *trim(char *s)
     return s;
 }
 
-static void ini_parse(const wchar_t *path)
+void ini_parse(const wchar_t *path)
 {
     g_ini_n = 0;
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
@@ -198,7 +215,7 @@ static void ini_parse(const wchar_t *path)
     HeapFree(GetProcessHeap(), 0, buf);
 }
 
-static void ini_str(const char *sec, const char *key, const char *def, char *out, int cap)
+void ini_str(const char *sec, const char *key, const char *def, char *out, int cap)
 {
     for (int i = g_ini_n - 1; i >= 0; i--) {
         if (_stricmp(g_ini_e[i].sec, sec) == 0 && _stricmp(g_ini_e[i].key, key) == 0) {
@@ -243,7 +260,7 @@ static const char *const k_pad_defaults[ACT_COUNT] = {
     "A", "B", "X, START", "BACK",
     "LB", "RB",
     "DUP", "DDOWN", "DLEFT", "DRIGHT",
-    "LT", "RT",
+    "NONE", "NONE",
 };
 static const char *const k_key_defaults[ACT_COUNT] = {
     "RETURN, SPACE", "RCONTROL, APPS", "NONE", "HOME",
@@ -307,6 +324,13 @@ void config_load(const wchar_t *ini_path)
             "UI_scroll_bar, UI_scroll_bar_ext, draw_text_box, battle_log_draw, cosmetic_draw",
             c->ignore_scripts, sizeof c->ignore_scripts);
 
+    c->overlay = ini_int("overlay", "enabled", 1);
+    c->ov_highlight = ini_int("overlay", "highlight", 1);
+    c->ov_prompts = ini_int("overlay", "prompts", 1);
+    c->ov_scale = ini_float("overlay", "scale", 0.0f);
+    ini_str("shortcuts", "bind_modifier", "BACK", b, sizeof b);
+    c->bind_mod = parse_pad_bit(b);
+
     ini_str("cursor", "parsec_fix", "off", b, sizeof b);
     if (_stricmp(b, "transparent") == 0 || _stricmp(b, "on") == 0 || strcmp(b, "1") == 0) c->cursorfix_mode = CURSORFIX_TRANSPARENT;
     else if (_stricmp(b, "arrow") == 0) c->cursorfix_mode = CURSORFIX_ARROW;
@@ -340,6 +364,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     if (!slash) return TRUE;
     slash[1] = 0;
     if (wcslen(dir) + 32 >= MAX_PATH) return TRUE;
+    wcscpy(g_mod_dir, dir);
     wcscpy(g_log_path, dir); wcscat(g_log_path, L"grail_input.log");
     wcscpy(ini, dir); wcscat(ini, L"grail_input.ini");
     DeleteFileW(g_log_path); /* fresh log every run */
@@ -375,6 +400,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         return TRUE;
     }
     hooks_install();
+    shortcuts_load();
     input_start();
     return TRUE;
 }

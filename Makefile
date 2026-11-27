@@ -8,9 +8,9 @@ WINDRES := x86_64-w64-mingw32-windres
 CFLAGS  := -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -std=gnu11 \
            -Iext/minhook/include -D_WIN32_WINNT=0x0601
 LDFLAGS := -shared -static -static-libgcc -s -Wl,--enable-stdcall-fixup
-LIBS    := -luser32 -lkernel32
+LIBS    := -luser32 -lkernel32 -ldxguid -luuid
 
-OWN_SRC := src/main.c src/gml_hooks.c src/input.c
+OWN_SRC := src/main.c src/gml_hooks.c src/input.c src/overlay.c src/shortcuts.c
 MH_SRC  := ext/minhook/src/hook.c ext/minhook/src/buffer.c ext/minhook/src/trampoline.c \
            ext/minhook/src/hde/hde64.c
 
@@ -29,7 +29,7 @@ $(MINHOOK_STAMP):
 	git clone -q $(MINHOOK_REPO) ext/minhook
 	cd ext/minhook && git checkout -q $(MINHOOK_COMMIT)
 
-build/version.dll: $(MINHOOK_STAMP) $(OWN_SRC) src/common.h src/version.def build/version_res.o
+build/version.dll: $(MINHOOK_STAMP) $(OWN_SRC) src/common.h src/font5x7.h src/version.def build/version_res.o
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(OWN_SRC) $(MH_SRC) src/version.def build/version_res.o -o $@ $(LDFLAGS) $(LIBS)
 

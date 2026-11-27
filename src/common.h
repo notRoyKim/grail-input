@@ -73,6 +73,13 @@ typedef struct {
     int drop_containers;  /* ignore panels that hold other targets */
     char ignore_scripts[512]; /* comma list of gml script names whose hover tests are not targets */
 
+    /* overlay (drawn on top of the game) */
+    int overlay, ov_highlight, ov_prompts;
+    float ov_scale;       /* 0 = automatic */
+
+    /* shortcuts */
+    uint32_t bind_mod;    /* pad button held to bind a shortcut */
+
     /* cursor */
     int cursorfix_mode;
     int override_mode;
@@ -80,7 +87,14 @@ typedef struct {
 } GiConfig;
 
 extern GiConfig g_cfg;
+extern wchar_t g_mod_dir[MAX_PATH];  /* folder of the dll, ends with a backslash */
 void config_load(const wchar_t *ini_path);
+void ini_parse(const wchar_t *path);  /* replaces what ini_str reads */
+void ini_str(const char *sec, const char *key, const char *def, char *out, int cap);
+int parse_vk(const char *s);
+uint32_t parse_pad_bit(const char *s);
+const char *pad_name(uint32_t bit);
+const char *vk_name(int vk, char *buf, int cap);
 
 /* ---------- game hooks (gml_hooks.c) ---------- */
 typedef struct { float cx, cy, w, h; uint16_t site; } NavRect;
@@ -88,7 +102,9 @@ typedef struct { float cx, cy, w, h; uint16_t site; } NavRect;
 /* where a hover test came from: the GML script that called mouse_on */
 typedef struct {
     void *ret;            /* return address of the mouse_on call */
-    const char *script;   /* "game_draw", "button_draw"... or "?" */
+    uint32_t off;         /* call offset inside `script` */
+    const char *script;   /* script that asked: "game_draw"... (for helpers like button_draw: their caller) */
+    const char *desc;     /* for logs: "menu_draw>button_draw" */
     uint8_t ignored;      /* script listed in ignore_scripts */
     uint8_t keep;         /* never treat as a container (cards, buttons) */
 } SiteInfo;
@@ -112,5 +128,31 @@ extern volatile LONG g_key_latch[256];
 
 /* ---------- input thread (input.c) ---------- */
 void input_start(void);
+
+/* ---------- overlay (overlay.c) ---------- */
+typedef struct { float x, y, w, h; } ORect;     /* client pixels, centre + size */
+typedef struct { ORect r; char label[12]; } OPrompt;
+#define OV_MAX_PROMPTS 16
+typedef struct {
+    int client_w, client_h;
+    int highlight_on; ORect highlight;
+    int nprompts; OPrompt prompts[OV_MAX_PROMPTS];
+    char toast[64]; double toast_until;     /* gi_now_ms() time */
+} OverlayState;
+void overlay_publish(const OverlayState *s);
+void overlay_start(HWND game_window);        /* installs the Present hook; input thread */
+int  overlay_active(void);
+
+/* ---------- shortcuts (shortcuts.c) ---------- */
+#define MAX_SLOTS 8
+typedef struct {
+    uint32_t pad; int key;                  /* triggers */
+    int bound;
+    char script[64]; uint32_t off;          /* which hover test */
+    float nx, ny;                           /* where it was on screen (0..1) */
+} Slot;
+extern Slot g_slots[MAX_SLOTS];
+void shortcuts_load(void);
+void shortcuts_save(void);
 
 #endif
