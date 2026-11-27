@@ -178,40 +178,85 @@ static BYTE *function_start(void *pc)
 
 /* ---------- call sites of the hover tests ---------- */
 #define MAX_SITES 1024
+typedef struct { void *ret, *parent; } SiteKey;
 static SiteInfo g_sites[MAX_SITES];
+static SiteKey g_site_keys[MAX_SITES];
 static volatile LONG g_nsites;
-static uint16_t g_site_hash[2048]; /* site index + 1, keyed by return address */
+static uint16_t g_site_hash[2048]; /* site index + 1 */
 static BYTE *g_ignored_fn[32]; static int g_nignored;
 static BYTE *g_keep_fn[8]; static int g_nkeep;
+/* helpers draw buttons/cards for many callers: their caller tells the buttons apart */
+static BYTE *g_helper_fn[8]; static int g_nhelper;
+static struct { void *ret; int helper; } g_ret_cache[256];
 
-static uint16_t site_of(void *ret) /* game thread only */
+static int is_helper_ret(void *ret) /* game thread only */
 {
-    uintptr_t h = ((uintptr_t)ret >> 2) * 2654435761u;
+    unsigned h = (unsigned)(((uintptr_t)ret >> 3) & 255);
+    for (int i = 0; i < 256; i++) {
+        unsigned k = (h + (unsigned)i) & 255;
+        if (g_ret_cache[k].ret == ret) return g_ret_cache[k].helper;
+        if (!g_ret_cache[k].ret) {
+            BYTE *fn = function_start(ret);
+            int hl = 0;
+            for (int j = 0; j < g_nhelper; j++) if (fn == g_helper_fn[j]) hl = 1;
+            g_ret_cache[k].ret = ret; g_ret_cache[k].helper = hl;
+            return hl;
+        }
+    }
+    return 0;
+}
+
+static void *caller_of_helper(void *ret)
+{
+    void *fr[4];
+    USHORT n = RtlCaptureStackBackTrace(1, 4, fr, NULL);
+    for (USHORT i = 0; i + 1 < n; i++) if (fr[i] == ret) return fr[i + 1];
+    return NULL;
+}
+
+static char g_names_pool[MAX_SITES][72];
+
+static uint16_t site_of(void *ret, void *parent) /* game thread only */
+{
+    uintptr_t h = (((uintptr_t)ret >> 2) ^ ((uintptr_t)parent >> 1)) * 2654435761u;
     for (int i = 0; i < 2048; i++) {
         uint16_t *slot = &g_site_hash[(h + (uintptr_t)i) & 2047];
         if (*slot) {
-            if (g_sites[*slot - 1].ret == ret) return (uint16_t)(*slot - 1);
+            SiteKey *k = &g_site_keys[*slot - 1];
+            if (k->ret == ret && k->parent == parent) return (uint16_t)(*slot - 1);
             continue;
         }
         if (g_nsites >= MAX_SITES) return 0xFFFF;
-        SiteInfo *si = &g_sites[g_nsites];
+        uint16_t idx = (uint16_t)g_nsites;
+        SiteInfo *si = &g_sites[idx];
         BYTE *fn = function_start(ret);
         const char *nm = fn ? fn_name(fn) : NULL;
+        BYTE *pfn = parent ? function_start(parent) : NULL;
+        const char *pnm = pfn ? fn_name(pfn) : NULL;
         si->ret = ret;
-        si->script = nm ? short_name(nm) : "?";
-        for (int k = 0; k < g_nignored; k++) if (fn == g_ignored_fn[k]) si->ignored = 1;
+        for (int k = 0; k < g_nignored; k++) if (fn == g_ignored_fn[k] || (pfn && pfn == g_ignored_fn[k])) si->ignored = 1;
         for (int k = 0; k < g_nkeep; k++) if (fn == g_keep_fn[k]) si->keep = 1;
-        uint16_t idx = (uint16_t)g_nsites;
+        if (parent && pfn) {
+            /* identify by where the helper was called from */
+            si->script = pnm ? short_name(pnm) : "?";
+            si->off = (uint32_t)((BYTE *)parent - pfn);
+            snprintf(g_names_pool[idx], sizeof g_names_pool[idx], "%s>%s", si->script, nm ? short_name(nm) : "?");
+        } else {
+            si->script = nm ? short_name(nm) : "?";
+            si->off = fn ? (uint32_t)((BYTE *)ret - fn) : 0;
+            snprintf(g_names_pool[idx], sizeof g_names_pool[idx], "%s", si->script);
+        }
+        si->desc = g_names_pool[idx];
+        g_site_keys[idx].ret = ret; g_site_keys[idx].parent = parent;
         InterlockedIncrement(&g_nsites);
         *slot = (uint16_t)(idx + 1);
-        LOG2("new hover site #%u in %s (+0x%llx)%s", idx, si->script,
-             (unsigned long long)((BYTE *)ret - g_img.lo), si->ignored ? " [ignored]" : "");
+        LOG2("new hover site #%u: %s +0x%x%s", idx, si->desc, si->off, si->ignored ? " [ignored]" : "");
         return idx;
     }
     return 0xFFFF;
 }
 
-static const SiteInfo k_unknown_site = { NULL, "?", 0, 0 };
+static const SiteInfo k_unknown_site = { NULL, 0, "?", "?", 0, 0 };
 const SiteInfo *hooks_site(uint16_t site)
 {
     return site < g_nsites ? &g_sites[site] : &k_unknown_site;
@@ -246,6 +291,11 @@ static void resolve_script_lists(void)
     for (int i = 0; i < 3; i++) {
         BYTE *fn = find_fn_by_short_name(keep[i]);
         if (fn) g_keep_fn[g_nkeep++] = fn;
+    }
+    static const char *const helpers[] = { "button_draw", "button_sprite", "card_on", "draw_banner" };
+    for (int i = 0; i < 4; i++) {
+        BYTE *fn = find_fn_by_short_name(helpers[i]);
+        if (fn) g_helper_fn[g_nhelper++] = fn;
     }
     LOG1("navigation: %d function names, %d ignored scripts", g_nfn, g_nignored);
 }
@@ -310,7 +360,8 @@ static RValue *hk_mouse_on(void *self, void *other, RValue *res, int argc, RValu
         rv_num(args[2], &w) && rv_num(args[3], &h)) {
         if (w < 0) w = -w;
         if (h < 0) h = -h;
-        add_rect((float)x, (float)y, (float)w, (float)h, site_of(__builtin_return_address(0)));
+        void *ret = __builtin_return_address(0);
+        add_rect((float)x, (float)y, (float)w, (float)h, site_of(ret, is_helper_ret(ret) ? caller_of_helper(ret) : NULL));
     }
     return o_mouse_on(self, other, res, argc, args);
 }
@@ -323,8 +374,9 @@ static RValue *hk_mouse_on_between(void *self, void *other, RValue *res, int arg
         double w = x2 - x1, h = y2 - y1;
         if (w < 0) w = -w;
         if (h < 0) h = -h;
+        void *ret = __builtin_return_address(0);
         add_rect((float)((x1 + x2) * 0.5), (float)((y1 + y2) * 0.5), (float)w, (float)h,
-                 site_of(__builtin_return_address(0)));
+                 site_of(ret, is_helper_ret(ret) ? caller_of_helper(ret) : NULL));
     }
     return o_mouse_on_between(self, other, res, argc, args);
 }
@@ -473,7 +525,8 @@ static BOOL (WINAPI *p_PeekMessageW)(LPMSG, HWND, UINT, UINT, UINT);
 static void latch_key(const MSG *m)
 {
     UINT vk = (UINT)(m->wParam & 0xFF);
-    g_key_latch[vk] = 1;
+    /* bit 0 = pressed, bit 1 = Ctrl was down at that moment (message-synchronous state) */
+    g_key_latch[vk] = 1 | ((GetKeyState(VK_CONTROL) & 0x8000) ? 2 : 0);
     UINT ext = (m->lParam & 0x01000000) != 0;
     if (vk == VK_CONTROL) g_key_latch[ext ? VK_RCONTROL : VK_LCONTROL] = 1;
     else if (vk == VK_MENU) g_key_latch[ext ? VK_RMENU : VK_LMENU] = 1;
