@@ -4,6 +4,8 @@
 #include "common.h"
 #include <xinput.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 /* ---------- window ---------- */
 static HWND g_hwnd;
@@ -108,6 +110,7 @@ static void send_key(WORD vk, int up)
 static float g_vx, g_vy;          /* client coordinates */
 static int g_cw, g_ch;            /* client size */
 static int g_pad_mode;            /* we are driving the cursor */
+static int g_last_dev_pad;        /* last input came from the gamepad: show pad labels */
 static POINT g_commanded, g_anchor, g_last_real;
 
 /* Recent positions we warped to.  Under Wine/Proton a warp comes back later as
@@ -178,6 +181,7 @@ static void track_real_cursor(void)
             g_pad_mode = 0;
             set_override(0);
             LOG2("cursor: real mouse moved to (%ld,%ld), pad mode off", real.x, real.y);
+            g_last_dev_pad = 0;
         }
     }
     g_last_real = real;
@@ -418,7 +422,7 @@ static void dump_targets(const Target *t, int n)
     g_last_dump = now;
     LOG2("targets on screen (%d):", n);
     for (int i = 0; i < n; i++)
-        LOG2("  (%4.0f,%4.0f) %4.0fx%-4.0f %s", t[i].x, t[i].y, t[i].w, t[i].h, hooks_site(t[i].site)->script);
+        LOG2("  (%4.0f,%4.0f) %4.0fx%-4.0f %s", t[i].x, t[i].y, t[i].w, t[i].h, hooks_site(t[i].site)->desc);
 }
 
 static const float k_dir[4][2] = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }; /* up down left right */
@@ -450,7 +454,7 @@ static int smart_nav(int dir)
     }
     if (best < 0) { LOG2("nav %s: %d targets, none in that direction", k_dir_name[dir], n); return -1; }
     LOG2("nav %s: %d targets, (%.0f,%.0f) -> (%.0f,%.0f) size %.0fx%.0f [%s]", k_dir_name[dir], n,
-         px, py, t[best].x, t[best].y, t[best].w, t[best].h, hooks_site(t[best].site)->script);
+         px, py, t[best].x, t[best].y, t[best].w, t[best].h, hooks_site(t[best].site)->desc);
     move_cursor(t[best].x, t[best].y);
     return 1;
 }
@@ -465,6 +469,175 @@ static void do_nav(int dir)
     }
     float step = g_cfg.nav_step * (float)g_ch;
     move_cursor(g_vx + k_dir[dir][0] * step, g_vy + k_dir[dir][1] * step);
+}
+
+/* ---------- overlay state and shortcuts ---------- */
+static OverlayState g_ov;
+static Target g_tt[MAX_TARGETS];        /* targets of this tick */
+static int g_ntt;
+
+static void toast(const char *msg)
+{
+    snprintf(g_ov.toast, sizeof g_ov.toast, "%s", msg);
+    g_ov.toast_until = gi_now_ms() + 1800;
+    LOG1("toast: %s", msg);
+}
+
+static void refresh_targets(void)
+{
+    g_ntt = cal_ok() ? collect_targets(g_tt, MAX_TARGETS) : 0;
+}
+
+/* smallest target under a client point */
+static int target_at(float x, float y)
+{
+    int best = -1;
+    float ba = 1e30f;
+    for (int i = 0; i < g_ntt; i++) {
+        if (fabsf(g_tt[i].x - x) <= g_tt[i].w / 2 && fabsf(g_tt[i].y - y) <= g_tt[i].h / 2) {
+            float a = g_tt[i].w * g_tt[i].h;
+            if (a < ba) { ba = a; best = i; }
+        }
+    }
+    return best;
+}
+
+/* the button a slot was bound to, if it is on screen now */
+static int match_slot(const Slot *s)
+{
+    int best = -1;
+    float bd = 1e30f;
+    for (int pass = 0; pass < 2 && best < 0; pass++) {
+        for (int i = 0; i < g_ntt; i++) {
+            const SiteInfo *si = hooks_site(g_tt[i].site);
+            if (strcmp(si->script, s->script) != 0) continue;
+            if (pass == 0 && si->off != s->off) continue;
+            float dx = g_tt[i].x / g_cw - s->nx, dy = g_tt[i].y / g_ch - s->ny, d = dx * dx + dy * dy;
+            if (d < bd) { bd = d; best = i; }
+        }
+    }
+    if (best >= 0 && bd > 0.2f * 0.2f) return -1; /* same code, but somewhere else entirely */
+    return best;
+}
+
+static const char *slot_label(const Slot *s, char *buf, int cap)
+{
+    if (s->pad && (g_last_dev_pad || !s->key)) return pad_name(s->pad);
+    if (s->key) return vk_name(s->key, buf, cap);
+    return "?";
+}
+
+static void slot_title(int i, char *out, int cap)
+{
+    char kb[24];
+    const Slot *s = &g_slots[i];
+    if (s->key && s->pad) snprintf(out, (size_t)cap, "%s/%s", vk_name(s->key, kb, sizeof kb), pad_name(s->pad));
+    else if (s->key) snprintf(out, (size_t)cap, "%s", vk_name(s->key, kb, sizeof kb));
+    else if (s->pad) snprintf(out, (size_t)cap, "%s", pad_name(s->pad));
+    else snprintf(out, (size_t)cap, "SLOT %d", i + 1);
+}
+
+static int ensure_calibrated(void)
+{
+    if (cal_ok()) return 1;
+    float px = g_vx, py = g_vy;
+    int ok = calibrate_active();
+    move_cursor(px, py);
+    return ok;
+}
+
+static void bind_slot(int i)
+{
+    char title[48], msg[64];
+    slot_title(i, title, sizeof title);
+    if (!ensure_calibrated()) { toast("NOT READY - TRY AGAIN"); return; }
+    refresh_targets();
+    POINT c = game_cursor_client();
+    int t = target_at((float)c.x, (float)c.y);
+    Slot *s = &g_slots[i];
+    if (t < 0) {
+        s->bound = 0;
+        snprintf(msg, sizeof msg, "%s CLEARED", title);
+    } else {
+        const SiteInfo *si = hooks_site(g_tt[t].site);
+        snprintf(s->script, sizeof s->script, "%s", si->script);
+        s->off = si->off;
+        s->nx = g_tt[t].x / g_cw; s->ny = g_tt[t].y / g_ch;
+        s->bound = 1;
+        snprintf(msg, sizeof msg, "%s SET", title);
+        LOG1("shortcut %d -> %s +0x%x at (%.3f, %.3f)", i + 1, si->desc, s->off, s->nx, s->ny);
+    }
+    shortcuts_save();
+    toast(msg);
+}
+
+/* hold the bind button + press a pad button: that button's slot (or a free one) */
+static void pad_bind(uint32_t bit)
+{
+    int slot = -1;
+    for (int i = 0; i < MAX_SLOTS && slot < 0; i++) if (g_slots[i].pad == bit) slot = i;
+    for (int i = 0; i < MAX_SLOTS && slot < 0; i++) if (!g_slots[i].pad) { slot = i; g_slots[i].pad = bit; }
+    if (slot < 0) { toast("NO FREE SLOT"); return; }
+    bind_slot(slot);
+}
+
+/* a shortcut presses its button: move there, then click a couple of frames later */
+static struct { int stage; uint32_t f; double t; } g_click;
+
+static void run_slot(int i)
+{
+    char title[48], msg[64];
+    slot_title(i, title, sizeof title);
+    if (!g_slots[i].bound) {
+        char kb[24];
+        if (g_slots[i].key) snprintf(msg, sizeof msg, "%s: NOT SET - CTRL+%s ON A BUTTON", title, vk_name(g_slots[i].key, kb, sizeof kb));
+        else snprintf(msg, sizeof msg, "%s: NOT SET", title);
+        toast(msg);
+        return;
+    }
+    if (g_click.stage || !ensure_calibrated()) return;
+    refresh_targets();
+    int t = match_slot(&g_slots[i]);
+    if (t < 0) { snprintf(msg, sizeof msg, "%s: NOT ON THIS SCREEN", title); toast(msg); return; }
+    LOG2("shortcut %d -> (%.0f,%.0f) %s", i + 1, g_tt[t].x, g_tt[t].y, hooks_site(g_tt[t].site)->desc);
+    move_cursor(g_tt[t].x, g_tt[t].y);
+    g_click.stage = 1; g_click.f = hooks_frame(); g_click.t = gi_now_ms();
+}
+
+static void click_tick(double now)
+{
+    if (!g_click.stage) return;
+    int frames = hooks_have_frames() ? (int)(hooks_frame() - g_click.f) : (int)((now - g_click.t) / 17.0);
+    if (frames < 2 && now - g_click.t < 400) return;
+    send_mouse(g_click.stage == 1 ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0);
+    g_click.stage = g_click.stage == 1 ? 2 : 0;
+    g_click.f = hooks_frame(); g_click.t = now;
+}
+
+static void overlay_tick(void)
+{
+    if (!g_cfg.overlay) return;
+    refresh_targets();
+    g_ov.client_w = g_cw; g_ov.client_h = g_ch;
+    g_ov.highlight_on = 0;
+    if (g_pad_mode && g_ntt) {
+        int t = target_at(g_vx, g_vy);
+        if (t >= 0) {
+            g_ov.highlight_on = 1;
+            g_ov.highlight = (ORect){ g_tt[t].x, g_tt[t].y, g_tt[t].w, g_tt[t].h };
+        }
+    }
+    g_ov.nprompts = 0;
+    for (int i = 0; i < MAX_SLOTS && g_ov.nprompts < OV_MAX_PROMPTS; i++) {
+        if (!g_slots[i].bound) continue;
+        int t = match_slot(&g_slots[i]);
+        if (t < 0) continue;
+        OPrompt *p = &g_ov.prompts[g_ov.nprompts++];
+        p->r = (ORect){ g_tt[t].x, g_tt[t].y, g_tt[t].w, g_tt[t].h };
+        char kb[24];
+        snprintf(p->label, sizeof p->label, "%s", slot_label(&g_slots[i], kb, sizeof kb));
+    }
+    overlay_publish(&g_ov);
 }
 
 /* ---------- actions ---------- */
@@ -523,6 +696,9 @@ static float stick_curve(float x, float y, float dz, float *ox, float *oy)
 }
 
 /* ---------- main loop ---------- */
+static uint32_t g_prev_pad, g_prev_act, g_pad_suppress;
+static int g_mod_was, g_mod_combo;
+static int g_slotkey_prev[MAX_SLOTS];
 static DWORD WINAPI input_thread(LPVOID arg)
 {
     (void)arg;
@@ -543,7 +719,10 @@ static DWORD WINAPI input_thread(LPVOID arg)
             next_window_check = now + 1000;
             if (!g_hwnd || !IsWindow(g_hwnd)) {
                 g_hwnd = find_game_window();
-                if (g_hwnd && !logged_window++) LOG1("game window found");
+                if (g_hwnd && !logged_window++) {
+                    LOG1("game window found");
+                    if (g_cfg.overlay) overlay_start(g_hwnd);
+                }
             }
         }
         if (!g_hwnd) continue;
@@ -578,11 +757,47 @@ static DWORD WINAPI input_thread(LPVOID arg)
         int free_mod = kb && g_cfg.free_move_mod && key_held(g_cfg.free_move_mod);
         float kbx = 0, kby = 0;
 
+        /* gamepad: hold the bind button + another button binds a shortcut,
+         * a short tap of the bind button keeps its normal action (center) */
+        uint32_t raw = pad.buttons, newly = raw & ~g_prev_pad, bmod = g_cfg.bind_mod;
+        int mod_held = bmod && (raw & bmod);
+        if (raw || fabsf(pad.lx) > g_cfg.deadzone || fabsf(pad.ly) > g_cfg.deadzone) g_last_dev_pad = 1;
+        if (mod_held) {
+            if (!g_mod_was) g_mod_combo = 0;
+            for (uint32_t bit = 1; bit && bit <= PAD_RT; bit <<= 1)
+                if ((newly & ~bmod) & bit) { pad_bind(bit); g_mod_combo = 1; }
+        } else if (g_mod_was) {
+            if (!g_mod_combo && (g_cfg.pad_map[ACT_CENTER] & bmod)) fire(ACT_CENTER, 1);
+            g_pad_suppress = raw; /* buttons still held from the combo stay quiet until released */
+        }
+        g_mod_was = mod_held;
+        g_pad_suppress &= raw;
+        g_prev_pad = raw;
+        uint32_t act = mod_held ? 0 : (raw & ~bmod & ~g_pad_suppress);
+        uint32_t act_newly = act & ~g_prev_act;
+        g_prev_act = act;
+        for (int i = 0; i < MAX_SLOTS; i++)
+            if (g_slots[i].pad && (act_newly & g_slots[i].pad)) run_slot(i);
+
+        /* keyboard: a slot key runs its shortcut, Ctrl + the slot key binds it */
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            int vk = g_slots[i].key;
+            int k = kb && vk && key_down(vk);
+            if (k && !g_slotkey_prev[i]) {
+                int ctrl = g_latched[vk & 0xFF] ? (g_latched[vk & 0xFF] & 2) != 0 : key_held(VK_CONTROL);
+                g_last_dev_pad = 0;
+                if (ctrl) bind_slot(i); else run_slot(i);
+            }
+            g_slotkey_prev[i] = k;
+        }
+        click_tick(now);
+
         int now_down[ACT_COUNT];
         for (int a = 0; a < ACT_COUNT; a++) {
-            int d = (pad.buttons & g_cfg.pad_map[a]) != 0;
+            int d = (act & g_cfg.pad_map[a]) != 0;
             int k = 0;
             if (kb) for (int i = 0; i < MAX_KEYS_PER_ACT && g_cfg.key_map[a][i]; i++) k |= key_down(g_cfg.key_map[a][i]);
+            if (k) g_last_dev_pad = 0;
             if (k && free_mod && a >= ACT_NAV_UP && a <= ACT_NAV_RIGHT) {
                 kbx += k_dir[a - ACT_NAV_UP][0]; kby += k_dir[a - ACT_NAV_UP][1];
                 k = 0;
@@ -644,6 +859,8 @@ static DWORD WINAPI input_thread(LPVOID arg)
                 scroll_acc = 0;
             }
         }
+
+        overlay_tick();
 
         if (g_log_level >= 2 && now >= stats_at) {
             stats_at = now + 5000;
