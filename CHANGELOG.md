@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.0-beta.4
+
+- On-screen overlay (D3D11, also on Steam Deck / Proton):
+  - a frame around the button or card the D-pad / arrow keys selected
+  - the shortcut key next to every button that has a shortcut
+  - short messages when a shortcut is set or cannot be used
+- Shortcuts: 8 slots (F1-F8, slot 1 = LT, slot 2 = RT) that press a game button you choose.
+  Bind in game with Ctrl + F1..F8, or hold BACK and press a pad button, while the cursor is on the button.
+  Saved to `grail_input_shortcuts.ini`. Buttons drawn by shared code (the card piles, `button_draw`) are told apart by who drew them and where.
+- LT / RT no longer slow down / speed up the cursor (free for shortcuts); BACK centres the cursor on a short tap
+
+화면 위 표시(선택한 버튼 테두리, 단축키가 있는 버튼 옆 키 표시)와 단축키 기능을 추가했습니다. 버튼에 커서를 올리고 Ctrl+F1~F8(또는 BACK을 누른 채 패드 버튼)으로 지정하면 그 키가 그 버튼을 눌러 줍니다. LT/RT는 단축키 1·2번 칸이 되었습니다.
+
 ## v1.0.0-beta.3
 
 (v1.0.0-beta.2 was released from an incomplete commit and only contains the beta.1 behaviour; use beta.3.)

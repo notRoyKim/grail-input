@@ -24,8 +24,13 @@ A / Enter, Space              클릭 (누르고 있으면 드래그)
 B / 오른쪽 Ctrl               오른쪽 클릭
 X, START                      Esc (메뉴·닫기)
 LB, RB, 오른쪽 스틱 / PgUp, PgDn   스크롤
-LT / RT 누르고 있기           커서 느리게 / 빠르게
-BACK / Home                   커서를 화면 가운데로
+LT / RT, F1 ~ F8              단축키 (아래 참고)
+BACK 짧게 / Home              커서를 화면 가운데로
+
+==================== 단축키 ====================
+게임 버튼에 커서를 올리고 Ctrl + F1 ~ F8 (패드: BACK을 누른 채 LT 등)
+-> 그 키가 그 버튼을 눌러 줍니다. 버튼 옆에 키가 표시됩니다.
+1번 칸 = F1 / LT, 2번 칸 = F2 / RT. 빈 곳에서 하면 비워집니다.
 
 버튼·키는 grail_input.ini 에서 바꿀 수 있습니다.
 Parsec 원격 플레이: grail_input.ini 의 [cursor] parsec_fix = transparent
@@ -37,5 +42,7 @@ Steam Deck: also set the launch option  WINEDLLOVERRIDES="version=n,b" %command%
 Uninstall: delete version.dll.
 Controls: left stick = cursor, D-pad/arrows = jump between buttons and cards,
 A/Enter/Space = click (hold to drag), B/Right Ctrl = right click, X/Start = Esc,
-LB/RB/right stick/PageUp/PageDown = scroll, LT/RT = slow/fast, Back/Home = centre.
+LB/RB/right stick/PageUp/PageDown = scroll, Back/Home = centre.
+Shortcuts: cursor on a game button + Ctrl+F1..F8 (pad: hold Back + LT...) binds that key;
+slot 1 = F1/LT, slot 2 = F2/RT.
 Problems: set log_level = 2 in grail_input.ini and check grail_input.log.
